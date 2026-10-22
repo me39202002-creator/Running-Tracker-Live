@@ -36,30 +36,19 @@ const AppState = {
 };
 
 // --- API 與純函數區塊 (Pure Functions) ---
-const PICSEE_API_KEY = "197894d9f225c4e70edd37a30d05f7dca30fce94";
 
+// 替換為免金鑰、無 CORS 限制的 TinyURL API
 async function generateShortUrl(longUrl) {
     try {
-        const response = await fetch("https://api.picsee.io/v1/links", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${PICSEE_API_KEY}`
-            },
-            body: JSON.stringify({ url: longUrl })
-        });
-
-        const data = await response.json();
+        const response = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`);
         
-        // 兼容 PicSee API 回傳格式
-        if (data && data.data && data.data.shortUrl) {
-            return data.data.shortUrl;
-        } else if (data && data.shortUrl) {
-            return data.shortUrl;
+        if (response.ok) {
+            const shortUrl = await response.text();
+            return shortUrl;
         }
-        return longUrl; // 若轉換失敗，自動退回長連結
+        return longUrl; // 若失敗，自動退回長連結
     } catch (error) {
-        console.error("PicSee 短網址生成失敗：", error);
+        console.error("短網址生成失敗：", error);
         return longUrl;
     }
 }
@@ -121,7 +110,7 @@ function bindEvents() {
         syncPositionToCloud(true); 
     });
 
-    // 點擊分享按鈕時，自動呼叫 PicSee 轉短網址
+    // 點擊分享按鈕時，自動呼叫 TinyURL 轉短網址
     UI.openShareBtn.addEventListener('click', async () => {
         UI.shareModal.classList.remove('hidden');
         
@@ -252,88 +241,3 @@ function syncPositionToCloud(force = false) {
         iconUrl: AppState.runner.iconUrl,
         timestamp: now
     });
-}
-
-window.initMap = function() {
-    AppState.mapInstance = new google.maps.Map(document.getElementById('map'), {
-        zoom: 16, 
-        center: { lat: 25.055, lng: 121.510 }, 
-        mapTypeId: 'roadmap', 
-        disableDefaultUI: true, 
-        zoomControl: true       
-    });
-
-    onChildAdded(roomRunnersRef, (snapshot) => {
-        createOrUpdateMarker(snapshot.key, snapshot.val());
-    });
-
-    onChildChanged(roomRunnersRef, (snapshot) => {
-        createOrUpdateMarker(snapshot.key, snapshot.val());
-    });
-
-    onChildRemoved(roomRunnersRef, (snapshot) => {
-        const id = snapshot.key;
-        if (AppState.markers[id]) {
-            AppState.markers[id].marker.setMap(null);
-            delete AppState.markers[id];
-        }
-    });
-};
-
-function createOrUpdateMarker(id, partnerData) {
-    const position = { lat: partnerData.lat, lng: partnerData.lng };
-    const markerIcon = partnerData.iconUrl || 'https://maps.google.com/mapfiles/ms/icons/red-dot.png';
-    const isMe = id === AppState.runner.id;
-    const displayDistance = partnerData.distance ? partnerData.distance.toFixed(2) : "0.00";
-
-    const infoContent = `
-        <div class="p-2 min-w-[140px]">
-            <h3 class="font-bold text-base text-gray-800 mb-1 border-b pb-1">
-                ${escapeHTML(partnerData.name)} ${isMe ? '<span class="text-xs text-red-500">(我)</span>' : ''}
-            </h3>
-            <div class="mt-2 space-y-1">
-                <p class="text-sm text-gray-600 flex justify-between">
-                    <span>里程：</span>
-                    <span class="font-semibold text-green-600">${displayDistance} km</span>
-                </p>
-                <p class="text-sm text-gray-600 flex justify-between">
-                    <span>配速：</span>
-                    <span class="font-semibold text-blue-600">${escapeHTML(partnerData.pace || '計算中...')}</span>
-                </p>
-            </div>
-        </div>
-    `;
-
-    if (AppState.markers[id]) {
-        AppState.markers[id].marker.setPosition(position);
-        AppState.markers[id].marker.setIcon(markerIcon);
-        AppState.markers[id].infoWindow.setContent(infoContent);
-    } else {
-        const marker = new google.maps.Marker({ 
-            position, 
-            map: AppState.mapInstance, 
-            title: partnerData.name,
-            icon: markerIcon
-        });
-        const infoWindow = new google.maps.InfoWindow({ content: infoContent });
-        
-        infoWindow.open(AppState.mapInstance, marker);
-        marker.addListener('click', () => infoWindow.open(AppState.mapInstance, marker));
-        
-        AppState.markers[id] = { marker, infoWindow };
-    }
-}
-
-function escapeHTML(str) {
-    return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
-}
-
-function loadGoogleMaps() {
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=AIzaSyDlZZObJLVB69jtS8wvlAHWEKgcZlEC63I&callback=initMap`;
-    script.async = true; 
-    script.defer = true;
-    document.head.appendChild(script);
-}
-
-initApp();
