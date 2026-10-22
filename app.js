@@ -35,9 +35,35 @@ const AppState = {
     markers: {} 
 };
 
-// --- 純函數區塊 (Pure Functions) ---
+// --- API 與純函數區塊 (Pure Functions) ---
+const PICSEE_API_KEY = "197894d9f225c4e70edd37a30d05f7dca30fce94";
 
-// 計算 GPS 距離 (半正矢公式)
+async function generateShortUrl(longUrl) {
+    try {
+        const response = await fetch("https://api.picsee.io/v1/links", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${PICSEE_API_KEY}`
+            },
+            body: JSON.stringify({ url: longUrl })
+        });
+
+        const data = await response.json();
+        
+        // 兼容 PicSee API 回傳格式
+        if (data && data.data && data.data.shortUrl) {
+            return data.data.shortUrl;
+        } else if (data && data.shortUrl) {
+            return data.shortUrl;
+        }
+        return longUrl; // 若轉換失敗，自動退回長連結
+    } catch (error) {
+        console.error("PicSee 短網址生成失敗：", error);
+        return longUrl;
+    }
+}
+
 function calculateDistance(lat1, lon1, lat2, lon2) {
     const R = 6371; 
     const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -48,7 +74,6 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
     return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
 }
 
-// 格式化配速為 MM'SS" (例如: 5.5 分鐘 -> 5'30")
 function formatPace(paceInMinutes) {
     const mins = Math.floor(paceInMinutes);
     const secs = Math.floor((paceInMinutes - mins) * 60);
@@ -80,10 +105,6 @@ const UI = {
 };
 
 function initApp() {
-    const currentUrl = new URL(window.location.href);
-    currentUrl.searchParams.set('room', AppState.roomId);
-    UI.shareLinkInput.value = currentUrl.href;
-
     bindEvents();
     loadGoogleMaps();
 }
@@ -100,7 +121,19 @@ function bindEvents() {
         syncPositionToCloud(true); 
     });
 
-    UI.openShareBtn.addEventListener('click', () => UI.shareModal.classList.remove('hidden'));
+    // 點擊分享按鈕時，自動呼叫 PicSee 轉短網址
+    UI.openShareBtn.addEventListener('click', async () => {
+        UI.shareModal.classList.remove('hidden');
+        
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.set('room', AppState.roomId);
+        const longUrl = currentUrl.href;
+
+        UI.shareLinkInput.value = "正在產生短網址...";
+        const shortUrl = await generateShortUrl(longUrl);
+        UI.shareLinkInput.value = shortUrl;
+    });
+
     UI.closeShareBtn.addEventListener('click', () => UI.shareModal.classList.add('hidden'));
 
     UI.copyLinkBtn.addEventListener('click', () => {
@@ -162,7 +195,6 @@ function startSharing(durationMinutes) {
                 } else if (timeDiffMins > 0.25) {
                     // 若超過 15 秒移動不到 1 公尺，判定為靜止
                     AppState.runner.pace = '靜止中...';
-                    // 推進時間戳，避免下次移動時累積過大的時間差導致配速失真
                     AppState.runner.lastPosition.timestamp = now;
                 }
             } else {
