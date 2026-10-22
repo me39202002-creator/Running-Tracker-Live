@@ -38,15 +38,22 @@ const AppState = {
 // --- API 與純函數區塊 (Pure Functions) ---
 
 // 替換為免金鑰、無 CORS 限制的 TinyURL API
+// --- 透過 CORS Proxy 繞過瀏覽器限制並呼叫 TinyURL ---
 async function generateShortUrl(longUrl) {
     try {
-        const response = await fetch(`https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`);
+        // 1. 準備目標 TinyURL API 網址
+        const targetApi = `https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`;
+        
+        // 2. 透過 AllOrigins 公開代理伺服器繞過 CORS 阻擋
+        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApi)}`;
+        
+        const response = await fetch(proxyUrl);
         
         if (response.ok) {
             const shortUrl = await response.text();
             return shortUrl;
         }
-        return longUrl; 
+        return longUrl; // 若代理失敗，自動退回長連結
     } catch (error) {
         console.error("短網址生成失敗：", error);
         return longUrl;
