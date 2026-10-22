@@ -21,34 +21,34 @@ const AppState = {
         iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png',
         lat: null,
         lng: null,
+        accuracy: null,
         distance: 0,
-        pace: '計算中...',
+        pace: '定位中...',
         lastPosition: null 
     },
     gps: {
         watchId: null,
         timeoutId: null,
+        wakeLock: null,
         lastSyncTime: 0,
-        SYNC_INTERVAL_MS: 3000 
+        SYNC_INTERVAL_MS: 3000,
+        MAX_ACCURACY_METERS: 25,
+        MIN_DISTANCE_KM: 0.003,
+        WINDOW_SIZE: 5,
+        history: []
     },
     mapInstance: null,
     markers: {} 
 };
 
-// --- API 與純函數區塊 (Pure Functions) ---
-
-// 替換為免金鑰、無 CORS 限制的 TinyURL API
-// --- 透過 CORS Proxy 繞過瀏覽器限制並呼叫 TinyURL ---
 async function generateShortUrl(longUrl) {
     try {
         const response = await fetch(`https://is.gd/create.php?format=json&url=${encodeURIComponent(longUrl)}`);
         const data = await response.json();
-        
-        // 如果成功回傳，提取短網址
         if (data && data.shorturl) {
             return data.shorturl;
         }
-        return longUrl; // 若失敗，自動退回長連結
+        return longUrl;
     } catch (error) {
         console.error("is.gd 短網址生成失敗：", error);
         return longUrl;
@@ -71,7 +71,49 @@ function formatPace(paceInMinutes) {
     return `${mins}'${secs.toString().padStart(2, '0')}"`;
 }
 
-// --- Firebase 初始化 ---
+function computeSmoothedPace(hardwareSpeed, history) {
+    // 優先使用 GPS 晶片都卜勒速度 (單位: m/s)，大於 0.5 m/s (約 1.8 km/h) 視為移動中
+    if (typeof hardwareSpeed === 'number' && hardwareSpeed >= 0.5) {
+        const paceMins = (1000 / hardwareSpeed) / 60;
+        if (paceMins >= 2.0 && paceMins <= 30.0) {
+            return formatPace(paceMins);
+        }
+    }
+
+    // 若瀏覽器未提供硬體速度，使用滑動視窗首尾座標計算平均配速
+    if (history.length >= 2) {
+        const oldest = history[0];
+        const newest = history[history.length - 1];
+        const totalDistKm = calculateDistance(oldest.lat, oldest.lng, newest.lat, newest.lng);
+        const totalTimeMins = (newest.timestamp - oldest.timestamp) / 60000;
+
+        if (totalDistKm > 0.005 && totalTimeMins > 0) {
+            const windowPace = totalTimeMins / totalDistKm;
+            if (windowPace >= 2.0 && windowPace <= 30.0) {
+                return formatPace(windowPace);
+            }
+        }
+    }
+    return null;
+}
+
+async function requestWakeLock() {
+    if ('wakeLock' in navigator) {
+        try {
+            AppState.gps.wakeLock = await navigator.wakeLock.request('screen');
+        } catch (err) {
+            console.warn("無法啟用螢幕常亮鎖：", err.message);
+        }
+    }
+}
+
+function releaseWakeLock() {
+    if (AppState.gps.wakeLock) {
+        AppState.gps.wakeLock.release();
+        AppState.gps.wakeLock = null;
+    }
+}
+
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 const myRunnerRef = ref(db, `rooms/${AppState.roomId}/runners/${AppState.runner.id}`);
@@ -112,7 +154,6 @@ function bindEvents() {
         syncPositionToCloud(true); 
     });
 
-    // 點擊分享按鈕時，自動呼叫 TinyURL 轉短網址
     UI.openShareBtn.addEventListener('click', async () => {
         UI.shareModal.classList.remove('hidden');
         
@@ -152,39 +193,58 @@ function startSharing(durationMinutes) {
 
     stopSharing(); 
     UI.activeShareBadge.classList.remove('hidden');
+    requestWakeLock();
 
     AppState.runner.distance = 0;
-    AppState.runner.pace = '計算中...';
+    AppState.runner.pace = '定位中...';
     AppState.runner.lastPosition = null;
+    AppState.gps.history = [];
 
     AppState.gps.watchId = navigator.geolocation.watchPosition(
         (position) => {
-            const currentLat = position.coords.latitude;
-            const currentLng = position.coords.longitude;
+            const { latitude: currentLat, longitude: currentLng, accuracy, speed } = position.coords;
             const now = Date.now();
+
+            // 邊界過濾：丟棄誤差半徑超過 25 公尺的粗略定位訊號
+            if (accuracy > AppState.gps.MAX_ACCURACY_METERS) {
+                console.warn(`略過低精度訊號: 誤差 ${Math.round(accuracy)}m`);
+                return;
+            }
+
+            AppState.runner.accuracy = Math.round(accuracy);
 
             if (AppState.runner.lastPosition) {
                 const dist = calculateDistance(
                     AppState.runner.lastPosition.lat, AppState.runner.lastPosition.lng,
                     currentLat, currentLng
                 );
-                
-                const timeDiffMins = (now - AppState.runner.lastPosition.timestamp) / 60000;
+                const timeDiffSec = (now - AppState.runner.lastPosition.timestamp) / 1000;
 
-                if (dist > 0.001) {
+                // 動態防漂移：移動距離需大於 3 公尺，且大於當前誤差半徑的 20%
+                const minValidDistKm = Math.max(AppState.gps.MIN_DISTANCE_KM, (accuracy * 0.2) / 1000);
+
+                if (dist >= minValidDistKm) {
                     AppState.runner.distance += dist;
-                    const rawPace = timeDiffMins / dist;
-                    
-                    if (rawPace > 2.0 && rawPace < 50.0) {
-                        AppState.runner.pace = formatPace(rawPace);
-                    }
                     AppState.runner.lastPosition = { lat: currentLat, lng: currentLng, timestamp: now };
-                } else if (timeDiffMins > 0.25) {
-                    AppState.runner.pace = '靜止中...';
+
+                    AppState.gps.history.push({ lat: currentLat, lng: currentLng, timestamp: now });
+                    if (AppState.gps.history.length > AppState.gps.WINDOW_SIZE) {
+                        AppState.gps.history.shift();
+                    }
+
+                    const smoothedPace = computeSmoothedPace(speed, AppState.gps.history);
+                    if (smoothedPace) {
+                        AppState.runner.pace = smoothedPace;
+                    }
+                } else if (timeDiffSec > 12) {
+                    AppState.runner.pace = '靜止中';
                     AppState.runner.lastPosition.timestamp = now;
+                    AppState.gps.history = [{ lat: currentLat, lng: currentLng, timestamp: now }];
                 }
             } else {
                 AppState.runner.lastPosition = { lat: currentLat, lng: currentLng, timestamp: now };
+                AppState.gps.history.push({ lat: currentLat, lng: currentLng, timestamp: now });
+                AppState.runner.pace = '準備起跑';
             }
 
             AppState.runner.lat = currentLat;
@@ -216,6 +276,7 @@ function stopSharing() {
         clearTimeout(AppState.gps.timeoutId);
         AppState.gps.timeoutId = null;
     }
+    releaseWakeLock();
     remove(myRunnerRef); 
     UI.activeShareBadge.classList.add('hidden');
 }
@@ -233,6 +294,7 @@ function syncPositionToCloud(force = false) {
         name: AppState.runner.name,
         lat: AppState.runner.lat,
         lng: AppState.runner.lng,
+        accuracy: AppState.runner.accuracy,
         pace: AppState.runner.pace,
         distance: AppState.runner.distance,
         iconUrl: AppState.runner.iconUrl,
@@ -271,11 +333,13 @@ function createOrUpdateMarker(id, partnerData) {
     const markerIcon = partnerData.iconUrl || 'https://maps.google.com/mapfiles/ms/icons/red-dot.png';
     const isMe = id === AppState.runner.id;
     const displayDistance = partnerData.distance ? partnerData.distance.toFixed(2) : "0.00";
+    const accuracyText = partnerData.accuracy ? `±${partnerData.accuracy}m` : '';
 
     const infoContent = `
-        <div class="p-2 min-w-[140px]">
-            <h3 class="font-bold text-base text-gray-800 mb-1 border-b pb-1">
-                ${escapeHTML(partnerData.name)} ${isMe ? '<span class="text-xs text-red-500">(我)</span>' : ''}
+        <div class="p-2 min-w-[150px]">
+            <h3 class="font-bold text-base text-gray-800 mb-1 border-b pb-1 flex justify-between items-center">
+                <span>${escapeHTML(partnerData.name)} ${isMe ? '<span class="text-xs text-red-500">(我)</span>' : ''}</span>
+                <span class="text-[10px] text-gray-400 font-normal">${escapeHTML(accuracyText)}</span>
             </h3>
             <div class="mt-2 space-y-1">
                 <p class="text-sm text-gray-600 flex justify-between">
@@ -284,7 +348,7 @@ function createOrUpdateMarker(id, partnerData) {
                 </p>
                 <p class="text-sm text-gray-600 flex justify-between">
                     <span>配速：</span>
-                    <span class="font-semibold text-blue-600">${escapeHTML(partnerData.pace || '計算中...')}</span>
+                    <span class="font-semibold text-blue-600">${escapeHTML(partnerData.pace || '定位中...')}</span>
                 </p>
             </div>
         </div>
