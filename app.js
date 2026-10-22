@@ -41,21 +41,16 @@ const AppState = {
 // --- 透過 CORS Proxy 繞過瀏覽器限制並呼叫 TinyURL ---
 async function generateShortUrl(longUrl) {
     try {
-        // 1. 準備目標 TinyURL API 網址
-        const targetApi = `https://tinyurl.com/api-create.php?url=${encodeURIComponent(longUrl)}`;
+        const response = await fetch(`https://is.gd/create.php?format=json&url=${encodeURIComponent(longUrl)}`);
+        const data = await response.json();
         
-        // 2. 透過 AllOrigins 公開代理伺服器繞過 CORS 阻擋
-        const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetApi)}`;
-        
-        const response = await fetch(proxyUrl);
-        
-        if (response.ok) {
-            const shortUrl = await response.text();
-            return shortUrl;
+        // 如果成功回傳，提取短網址
+        if (data && data.shorturl) {
+            return data.shorturl;
         }
-        return longUrl; // 若代理失敗，自動退回長連結
+        return longUrl; // 若失敗，自動退回長連結
     } catch (error) {
-        console.error("短網址生成失敗：", error);
+        console.error("is.gd 短網址生成失敗：", error);
         return longUrl;
     }
 }
