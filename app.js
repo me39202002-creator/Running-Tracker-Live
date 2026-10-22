@@ -1,5 +1,7 @@
+console.log("app.js 初始化中...");
+
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.5.0/firebase-app.js";
-import { getDatabase, ref, set, onValue, onDisconnect, remove } from "https://www.gstatic.com/firebasejs/10.5.0/firebase-database.js";
+import { getDatabase, ref, set, onChildAdded, onChildChanged, onChildRemoved, onDisconnect, remove } from "https://www.gstatic.com/firebasejs/10.5.0/firebase-database.js";
 
 const firebaseConfig = {
     apiKey: "AIzaSyDoNzC4Prw6LzkcEFvaCN7Qcrz1Hol7Img",
@@ -11,163 +13,282 @@ const firebaseConfig = {
     appId: "1:721138080520:web:0ac52121dd9639413baabd"
 };
 
-const app = initializeApp(firebaseConfig);
-const db = getDatabase(app);
-
-// 處理房間 ID (從網址取得，若無則自動產生一個新的)
-const urlParams = new URLSearchParams(window.location.search);
-let roomId = urlParams.get('room');
-if (!roomId) {
-    roomId = 'room_' + Math.random().toString(36).substring(2, 9);
-}
-
-const myName = prompt("請輸入您的跑者暱稱：", "KEN-LEE") || "匿名跑者";
-const myId = 'runner_' + Math.random().toString(36).substring(2, 9);
-// 資料庫路徑改為：rooms/房間代號/runners/跑者代號
-const myRef = ref(db, `rooms/${roomId}/runners/${myId}`);
-
-// 斷線時自動移除
-onDisconnect(myRef).remove();
-
-let map;
-let partnerMarkers = {}; 
-let watchId = null;
-let sharingTimeout = null;
-
-// UI 元素
-const openShareBtn = document.getElementById('openShareBtn');
-const shareModal = document.getElementById('shareModal');
-const closeShareBtn = document.getElementById('closeShareBtn');
-const startShareBtn = document.getElementById('startShareBtn');
-const shareLinkInput = document.getElementById('shareLinkInput');
-const copyLinkBtn = document.getElementById('copyLinkBtn');
-const activeShareBadge = document.getElementById('activeShareBadge');
-const stopShareBtn = document.getElementById('stopShareBtn');
-
-// 產生專屬分享連結
-const currentUrl = new URL(window.location.href);
-currentUrl.searchParams.set('room', roomId);
-shareLinkInput.value = currentUrl.href;
-
-// 介面操作綁定
-openShareBtn.addEventListener('click', () => shareModal.classList.remove('hidden'));
-closeShareBtn.addEventListener('click', () => shareModal.classList.add('hidden'));
-
-copyLinkBtn.addEventListener('click', () => {
-    shareLinkInput.select();
-    navigator.clipboard.writeText(shareLinkInput.value).then(() => {
-        const originalText = copyLinkBtn.innerText;
-        copyLinkBtn.innerText = '已複製!';
-        setTimeout(() => copyLinkBtn.innerText = originalText, 2000);
-    });
-});
-
-startShareBtn.addEventListener('click', () => {
-    const durationMinutes = parseInt(document.getElementById('shareDuration').value);
-    startSharing(durationMinutes);
-    shareModal.classList.add('hidden');
-});
-
-stopShareBtn.addEventListener('click', stopSharing);
-
-window.initMap = function() {
-    const initialCenter = { lat: 25.055, lng: 121.510 };
-    map = new google.maps.Map(document.getElementById('map'), {
-        zoom: 16, center: initialCenter, mapTypeId: 'roadmap', disableDefaultUI: true, zoomControl: true       
-    });
-
-    // 預設不分享，但可以下載房間內其他人的位置
-    const roomRef = ref(db, `rooms/${roomId}/runners`);
-    onValue(roomRef, (snapshot) => {
-        const allRunnersData = snapshot.val() || {};
-        updateMapMarkers(allRunnersData);
-    });
+const AppState = {
+    roomId: new URLSearchParams(window.location.search).get('room') || 'room_' + Math.random().toString(36).substring(2, 9),
+    runner: {
+        id: 'runner_' + Math.random().toString(36).substring(2, 9),
+        name: '匿名跑者',
+        iconUrl: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png',
+        lat: null,
+        lng: null,
+        distance: 0,
+        pace: '計算中...',
+        lastPosition: null // 將包含 lat, lng, timestamp
+    },
+    gps: {
+        watchId: null,
+        timeoutId: null,
+        lastSyncTime: 0,
+        SYNC_INTERVAL_MS: 3000 
+    },
+    mapInstance: null,
+    markers: {} 
 };
 
-// 開始分享位置
+// --- 純函數區塊 (Pure Functions) ---
+
+// 計算 GPS 距離 (半正矢公式)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371; 
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)));
+}
+
+// 格式化配速為 MM'SS" (例如: 5.5 分鐘 -> 5'30")
+function formatPace(paceInMinutes) {
+    const mins = Math.floor(paceInMinutes);
+    const secs = Math.floor((paceInMinutes - mins) * 60);
+    return `${mins}'${secs.toString().padStart(2, '0')}"`;
+}
+
+// --- Firebase 初始化 ---
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+const myRunnerRef = ref(db, `rooms/${AppState.roomId}/runners/${AppState.runner.id}`);
+const roomRunnersRef = ref(db, `rooms/${AppState.roomId}/runners`);
+
+onDisconnect(myRunnerRef).remove();
+
+const UI = {
+    nameModal: document.getElementById('nameModal'),
+    runnerNameInput: document.getElementById('runnerNameInput'),
+    joinRoomBtn: document.getElementById('joinRoomBtn'),
+    iconSelect: document.getElementById('iconSelect'),
+    openShareBtn: document.getElementById('openShareBtn'),
+    shareModal: document.getElementById('shareModal'),
+    closeShareBtn: document.getElementById('closeShareBtn'),
+    startShareBtn: document.getElementById('startShareBtn'),
+    shareDuration: document.getElementById('shareDuration'),
+    shareLinkInput: document.getElementById('shareLinkInput'),
+    copyLinkBtn: document.getElementById('copyLinkBtn'),
+    activeShareBadge: document.getElementById('activeShareBadge'),
+    stopShareBtn: document.getElementById('stopShareBtn')
+};
+
+function initApp() {
+    const currentUrl = new URL(window.location.href);
+    currentUrl.searchParams.set('room', AppState.roomId);
+    UI.shareLinkInput.value = currentUrl.href;
+
+    bindEvents();
+    loadGoogleMaps();
+}
+
+function bindEvents() {
+    UI.joinRoomBtn.addEventListener('click', () => {
+        const inputName = UI.runnerNameInput.value.trim();
+        if (inputName) AppState.runner.name = inputName;
+        UI.nameModal.classList.add('hidden');
+    });
+
+    UI.iconSelect.addEventListener('change', (e) => {
+        AppState.runner.iconUrl = e.target.value;
+        syncPositionToCloud(true); 
+    });
+
+    UI.openShareBtn.addEventListener('click', () => UI.shareModal.classList.remove('hidden'));
+    UI.closeShareBtn.addEventListener('click', () => UI.shareModal.classList.add('hidden'));
+
+    UI.copyLinkBtn.addEventListener('click', () => {
+        UI.shareLinkInput.select();
+        navigator.clipboard.writeText(UI.shareLinkInput.value).then(() => {
+            const originalText = UI.copyLinkBtn.innerText;
+            UI.copyLinkBtn.innerText = '已複製!';
+            setTimeout(() => UI.copyLinkBtn.innerText = originalText, 2000);
+        });
+    });
+
+    UI.startShareBtn.addEventListener('click', () => {
+        startSharing(parseInt(UI.shareDuration.value));
+        UI.shareModal.classList.add('hidden');
+    });
+
+    UI.stopShareBtn.addEventListener('click', stopSharing);
+}
+
 function startSharing(durationMinutes) {
     if (!("geolocation" in navigator)) {
         alert("你的裝置不支援 GPS");
         return;
     }
 
-    // 若已經在追蹤，先清除
-    if (watchId) navigator.geolocation.clearWatch(watchId);
-    if (sharingTimeout) clearTimeout(sharingTimeout);
+    stopSharing(); 
+    UI.activeShareBadge.classList.remove('hidden');
 
-    activeShareBadge.classList.remove('hidden');
+    // 初始化狀態
+    AppState.runner.distance = 0;
+    AppState.runner.pace = '計算中...';
+    AppState.runner.lastPosition = null;
 
-    watchId = navigator.geolocation.watchPosition(
+    AppState.gps.watchId = navigator.geolocation.watchPosition(
         (position) => {
             const currentLat = position.coords.latitude;
             const currentLng = position.coords.longitude;
-            set(myRef, {
-                name: myName, lat: currentLat, lng: currentLng, pace: '計算中...', timestamp: Date.now()
-            });
-            map.setCenter({ lat: currentLat, lng: currentLng });
+            const now = Date.now();
+
+            if (AppState.runner.lastPosition) {
+                const dist = calculateDistance(
+                    AppState.runner.lastPosition.lat, AppState.runner.lastPosition.lng,
+                    currentLat, currentLng
+                );
+                
+                const timeDiffMins = (now - AppState.runner.lastPosition.timestamp) / 60000;
+
+                // 邊界防禦：移動超過 1 公尺才視為有效移動
+                if (dist > 0.001) {
+                    AppState.runner.distance += dist;
+                    const rawPace = timeDiffMins / dist;
+                    
+                    // 排除 GPS 漂移導致的極端數據 (僅接受 2分 ~ 50分/公里的合理範圍)
+                    if (rawPace > 2.0 && rawPace < 50.0) {
+                        AppState.runner.pace = formatPace(rawPace);
+                    }
+                    // 更新座標與時間戳
+                    AppState.runner.lastPosition = { lat: currentLat, lng: currentLng, timestamp: now };
+                } else if (timeDiffMins > 0.25) {
+                    // 若超過 15 秒移動不到 1 公尺，判定為靜止
+                    AppState.runner.pace = '靜止中...';
+                    // 推進時間戳，避免下次移動時累積過大的時間差導致配速失真
+                    AppState.runner.lastPosition.timestamp = now;
+                }
+            } else {
+                AppState.runner.lastPosition = { lat: currentLat, lng: currentLng, timestamp: now };
+            }
+
+            AppState.runner.lat = currentLat;
+            AppState.runner.lng = currentLng;
+            
+            if (AppState.mapInstance) {
+                AppState.mapInstance.setCenter({ lat: currentLat, lng: currentLng });
+            }
+            syncPositionToCloud();
         },
         (error) => console.error("GPS 失敗：", error.message),
         { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
 
-    // 設定時效自動停止 (如果 duration > 0)
     if (durationMinutes > 0) {
-        sharingTimeout = setTimeout(() => {
+        AppState.gps.timeoutId = setTimeout(() => {
             stopSharing();
             alert("分享時間已到，已自動停止分享位置。");
         }, durationMinutes * 60 * 1000);
     }
 }
 
-// 停止分享位置
 function stopSharing() {
-    if (watchId) {
-        navigator.geolocation.clearWatch(watchId);
-        watchId = null;
+    if (AppState.gps.watchId) {
+        navigator.geolocation.clearWatch(AppState.gps.watchId);
+        AppState.gps.watchId = null;
     }
-    if (sharingTimeout) {
-        clearTimeout(sharingTimeout);
-        sharingTimeout = null;
+    if (AppState.gps.timeoutId) {
+        clearTimeout(AppState.gps.timeoutId);
+        AppState.gps.timeoutId = null;
     }
-    remove(myRef); // 從雲端刪除自己的標記
-    activeShareBadge.classList.add('hidden');
-    alert("已停止分享位置。");
+    remove(myRunnerRef); 
+    UI.activeShareBadge.classList.add('hidden');
 }
 
-function updateMapMarkers(runnersData) {
-    const activeIds = Object.keys(runnersData);
-    for (let id in partnerMarkers) {
-        if (!activeIds.includes(id)) {
-            partnerMarkers[id].marker.setMap(null); 
-            delete partnerMarkers[id];
+function syncPositionToCloud(force = false) {
+    if (!AppState.runner.lat || !AppState.runner.lng) return;
+
+    const now = Date.now();
+    if (!force && (now - AppState.gps.lastSyncTime < AppState.gps.SYNC_INTERVAL_MS)) {
+        return; 
+    }
+
+    AppState.gps.lastSyncTime = now;
+    set(myRunnerRef, {
+        name: AppState.runner.name,
+        lat: AppState.runner.lat,
+        lng: AppState.runner.lng,
+        pace: AppState.runner.pace,
+        distance: AppState.runner.distance,
+        iconUrl: AppState.runner.iconUrl,
+        timestamp: now
+    });
+}
+
+window.initMap = function() {
+    AppState.mapInstance = new google.maps.Map(document.getElementById('map'), {
+        zoom: 16, 
+        center: { lat: 25.055, lng: 121.510 }, 
+        mapTypeId: 'roadmap', 
+        disableDefaultUI: true, 
+        zoomControl: true       
+    });
+
+    onChildAdded(roomRunnersRef, (snapshot) => {
+        createOrUpdateMarker(snapshot.key, snapshot.val());
+    });
+
+    onChildChanged(roomRunnersRef, (snapshot) => {
+        createOrUpdateMarker(snapshot.key, snapshot.val());
+    });
+
+    onChildRemoved(roomRunnersRef, (snapshot) => {
+        const id = snapshot.key;
+        if (AppState.markers[id]) {
+            AppState.markers[id].marker.setMap(null);
+            delete AppState.markers[id];
         }
-    }
-    for (let id in runnersData) {
-        createOrUpdateMarker(id, runnersData[id]);
-    }
-}
+    });
+};
 
-function createOrUpdateMarker(id, partner) {
-    const position = { lat: partner.lat, lng: partner.lng };
+function createOrUpdateMarker(id, partnerData) {
+    const position = { lat: partnerData.lat, lng: partnerData.lng };
+    const markerIcon = partnerData.iconUrl || 'https://maps.google.com/mapfiles/ms/icons/red-dot.png';
+    const isMe = id === AppState.runner.id;
+    const displayDistance = partnerData.distance ? partnerData.distance.toFixed(2) : "0.00";
+
     const infoContent = `
         <div class="p-2 min-w-[140px]">
             <h3 class="font-bold text-base text-gray-800 mb-1 border-b pb-1">
-                ${escapeHTML(partner.name)} ${id === myId ? '<span class="text-xs text-red-500">(我)</span>' : ''}
+                ${escapeHTML(partnerData.name)} ${isMe ? '<span class="text-xs text-red-500">(我)</span>' : ''}
             </h3>
             <div class="mt-2 space-y-1">
-                <p class="text-sm text-gray-600">配速：<span class="font-semibold text-blue-600">${escapeHTML(partner.pace)} /km</span></p>
+                <p class="text-sm text-gray-600 flex justify-between">
+                    <span>里程：</span>
+                    <span class="font-semibold text-green-600">${displayDistance} km</span>
+                </p>
+                <p class="text-sm text-gray-600 flex justify-between">
+                    <span>配速：</span>
+                    <span class="font-semibold text-blue-600">${escapeHTML(partnerData.pace || '計算中...')}</span>
+                </p>
             </div>
         </div>
     `;
-    if (partnerMarkers[id]) {
-        partnerMarkers[id].marker.setPosition(position);
-        partnerMarkers[id].infoWindow.setContent(infoContent);
+
+    if (AppState.markers[id]) {
+        AppState.markers[id].marker.setPosition(position);
+        AppState.markers[id].marker.setIcon(markerIcon);
+        AppState.markers[id].infoWindow.setContent(infoContent);
     } else {
-        const marker = new google.maps.Marker({ position: position, map: map, title: partner.name });
+        const marker = new google.maps.Marker({ 
+            position, 
+            map: AppState.mapInstance, 
+            title: partnerData.name,
+            icon: markerIcon
+        });
         const infoWindow = new google.maps.InfoWindow({ content: infoContent });
-        infoWindow.open(map, marker);
-        marker.addListener('click', () => infoWindow.open(map, marker));
-        partnerMarkers[id] = { marker, infoWindow };
+        
+        infoWindow.open(AppState.mapInstance, marker);
+        marker.addListener('click', () => infoWindow.open(AppState.mapInstance, marker));
+        
+        AppState.markers[id] = { marker, infoWindow };
     }
 }
 
@@ -178,8 +299,9 @@ function escapeHTML(str) {
 function loadGoogleMaps() {
     const script = document.createElement('script');
     script.src = `https://maps.googleapis.com/maps/api/js?key=AIzaSyDlZZObJLVB69jtS8wvlAHWEKgcZlEC63I&callback=initMap`;
-    script.async = true; script.defer = true;
+    script.async = true; 
+    script.defer = true;
     document.head.appendChild(script);
 }
 
-loadGoogleMaps();
+initApp();

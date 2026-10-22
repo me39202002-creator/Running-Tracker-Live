@@ -12,8 +12,32 @@
 </head>
 <body class="bg-gray-50 m-0 p-0 overflow-hidden font-sans relative">
 
+    <!-- 登入/設定暱稱彈窗 -->
+    <div id="nameModal" class="absolute inset-0 bg-black bg-opacity-70 z-50 flex items-center justify-center">
+        <div class="bg-white p-6 rounded-xl shadow-2xl w-80 text-center">
+            <h2 class="text-xl font-bold text-gray-800 mb-4">加入跑步房間</h2>
+            <input type="text" id="runnerNameInput" placeholder="請輸入您的暱稱 (預設: KEN-LEE)" value="KEN-LEE" class="w-full border border-gray-300 rounded-lg p-2 mb-4 text-center focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <button id="joinRoomBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg transition">進入地圖</button>
+        </div>
+    </div>
+
     <!-- 地圖容器 -->
     <div id="map"></div>
+
+    <!-- 右上角：跑者圖示選擇器 -->
+    <div class="absolute top-4 right-4 bg-white p-3 rounded-xl shadow-lg z-10 border border-gray-200 w-44">
+        <label class="block text-xs font-bold text-gray-700 mb-2">選擇我的專屬圖示</label>
+        <select id="iconSelect" class="w-full border-gray-300 border rounded-lg p-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50 cursor-pointer">
+            <option value="https://maps.google.com/mapfiles/ms/icons/red-dot.png">🔴 紅色</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/blue-dot.png">🔵 藍色</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/green-dot.png">🟢 綠色</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/yellow-dot.png">🟡 黃色</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/purple-dot.png">🟣 紫色</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/orange-dot.png">🟠 橘色</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/pink-dot.png">🩷 粉紅</option>
+            <option value="https://maps.google.com/mapfiles/ms/icons/ltblue-dot.png">🩵 淺藍</option>
+        </select>
+    </div>
 
     <!-- 右下角：分享位置資訊按鈕 -->
     <button id="openShareBtn" class="absolute bottom-6 right-6 bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full shadow-lg transition duration-200 flex items-center space-x-2 z-10">
@@ -23,9 +47,9 @@
         <span>分享位置資訊</span>
     </button>
 
-    <!-- 分享設定彈出視窗 (預設隱藏) -->
+    <!-- 分享設定彈出視窗 -->
     <div id="shareModal" class="hidden absolute inset-0 bg-black bg-opacity-50 z-20 flex items-center justify-center">
-        <div class="bg-white p-6 rounded-xl shadow-2xl w-80">
+        <div class="bg-white p-6 rounded-xl shadow-2xl w-80 relative">
             <h2 class="text-xl font-bold text-gray-800 mb-4">分享你的即時位置</h2>
             
             <label class="block text-sm font-medium text-gray-700 mb-1">選擇分享時間</label>
@@ -37,10 +61,8 @@
 
             <label class="block text-sm font-medium text-gray-700 mb-1">專屬邀請連結</label>
             <div class="flex mb-4">
-                <input type="text" id="shareLinkInput" readonly class="w-full border-gray-300 border rounded-l-lg p-2 text-sm bg-gray-50 focus:outline-none">
-                <button id="copyLinkBtn" class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 rounded-r-lg text-sm font-semibold transition">
-                    複製
-                </button>
+                <input type="text" id="shareLinkInput" readonly class="w-full border-gray-300 border rounded-l-lg p-2 text-sm bg-gray-50 focus:outline-none text-gray-500">
+                <button id="copyLinkBtn" class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-3 rounded-r-lg text-sm font-semibold transition">複製</button>
             </div>
 
             <div class="flex justify-end space-x-3 mt-6">
@@ -50,7 +72,7 @@
         </div>
     </div>
 
-    <!-- 停止分享浮動提示 (預設隱藏) -->
+    <!-- 停止分享浮動提示 -->
     <div id="activeShareBadge" class="hidden absolute top-4 left-1/2 transform -translate-x-1/2 bg-white px-4 py-2 rounded-full shadow border border-red-200 flex items-center space-x-3 z-10">
         <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
         <span class="text-sm font-medium text-gray-700">正在分享位置</span>
