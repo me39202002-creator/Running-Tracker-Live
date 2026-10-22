@@ -23,7 +23,7 @@ const AppState = {
         lng: null,
         distance: 0,
         pace: '計算中...',
-        lastPosition: null // 將包含 lat, lng, timestamp
+        lastPosition: null 
     },
     gps: {
         watchId: null,
@@ -46,7 +46,7 @@ async function generateShortUrl(longUrl) {
             const shortUrl = await response.text();
             return shortUrl;
         }
-        return longUrl; // 若失敗，自動退回長連結
+        return longUrl; 
     } catch (error) {
         console.error("短網址生成失敗：", error);
         return longUrl;
@@ -151,7 +151,6 @@ function startSharing(durationMinutes) {
     stopSharing(); 
     UI.activeShareBadge.classList.remove('hidden');
 
-    // 初始化狀態
     AppState.runner.distance = 0;
     AppState.runner.pace = '計算中...';
     AppState.runner.lastPosition = null;
@@ -170,19 +169,15 @@ function startSharing(durationMinutes) {
                 
                 const timeDiffMins = (now - AppState.runner.lastPosition.timestamp) / 60000;
 
-                // 邊界防禦：移動超過 1 公尺才視為有效移動
                 if (dist > 0.001) {
                     AppState.runner.distance += dist;
                     const rawPace = timeDiffMins / dist;
                     
-                    // 排除 GPS 漂移導致的極端數據 (僅接受 2分 ~ 50分/公里的合理範圍)
                     if (rawPace > 2.0 && rawPace < 50.0) {
                         AppState.runner.pace = formatPace(rawPace);
                     }
-                    // 更新座標與時間戳
                     AppState.runner.lastPosition = { lat: currentLat, lng: currentLng, timestamp: now };
                 } else if (timeDiffMins > 0.25) {
-                    // 若超過 15 秒移動不到 1 公尺，判定為靜止
                     AppState.runner.pace = '靜止中...';
                     AppState.runner.lastPosition.timestamp = now;
                 }
@@ -241,3 +236,88 @@ function syncPositionToCloud(force = false) {
         iconUrl: AppState.runner.iconUrl,
         timestamp: now
     });
+}
+
+window.initMap = function() {
+    AppState.mapInstance = new google.maps.Map(document.getElementById('map'), {
+        zoom: 16, 
+        center: { lat: 25.055, lng: 121.510 }, 
+        mapTypeId: 'roadmap', 
+        disableDefaultUI: true, 
+        zoomControl: true       
+    });
+
+    onChildAdded(roomRunnersRef, (snapshot) => {
+        createOrUpdateMarker(snapshot.key, snapshot.val());
+    });
+
+    onChildChanged(roomRunnersRef, (snapshot) => {
+        createOrUpdateMarker(snapshot.key, snapshot.val());
+    });
+
+    onChildRemoved(roomRunnersRef, (snapshot) => {
+        const id = snapshot.key;
+        if (AppState.markers[id]) {
+            AppState.markers[id].marker.setMap(null);
+            delete AppState.markers[id];
+        }
+    });
+};
+
+function createOrUpdateMarker(id, partnerData) {
+    const position = { lat: partnerData.lat, lng: partnerData.lng };
+    const markerIcon = partnerData.iconUrl || 'https://maps.google.com/mapfiles/ms/icons/red-dot.png';
+    const isMe = id === AppState.runner.id;
+    const displayDistance = partnerData.distance ? partnerData.distance.toFixed(2) : "0.00";
+
+    const infoContent = `
+        <div class="p-2 min-w-[140px]">
+            <h3 class="font-bold text-base text-gray-800 mb-1 border-b pb-1">
+                ${escapeHTML(partnerData.name)} ${isMe ? '<span class="text-xs text-red-500">(我)</span>' : ''}
+            </h3>
+            <div class="mt-2 space-y-1">
+                <p class="text-sm text-gray-600 flex justify-between">
+                    <span>里程：</span>
+                    <span class="font-semibold text-green-600">${displayDistance} km</span>
+                </p>
+                <p class="text-sm text-gray-600 flex justify-between">
+                    <span>配速：</span>
+                    <span class="font-semibold text-blue-600">${escapeHTML(partnerData.pace || '計算中...')}</span>
+                </p>
+            </div>
+        </div>
+    `;
+
+    if (AppState.markers[id]) {
+        AppState.markers[id].marker.setPosition(position);
+        AppState.markers[id].marker.setIcon(markerIcon);
+        AppState.markers[id].infoWindow.setContent(infoContent);
+    } else {
+        const marker = new google.maps.Marker({ 
+            position, 
+            map: AppState.mapInstance, 
+            title: partnerData.name,
+            icon: markerIcon
+        });
+        const infoWindow = new google.maps.InfoWindow({ content: infoContent });
+        
+        infoWindow.open(AppState.mapInstance, marker);
+        marker.addListener('click', () => infoWindow.open(AppState.mapInstance, marker));
+        
+        AppState.markers[id] = { marker, infoWindow };
+    }
+}
+
+function escapeHTML(str) {
+    return String(str).replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
+}
+
+function loadGoogleMaps() {
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=AIzaSyDlZZObJLVB69jtS8wvlAHWEKgcZlEC63I&callback=initMap`;
+    script.async = true; 
+    script.defer = true;
+    document.head.appendChild(script);
+}
+
+initApp();
